@@ -77,8 +77,50 @@ function isValidAmount(amount) {
   return Number.isInteger(amount) && amount > 0 && amount <= 100000; // Max $1000
 }
 
-// Rate limiting
-const requestCounts = new Map();
+// Dynamic product validation against Stripe catalog
+async function validateProduct(productId, amount) {
+  try {
+    // Get product details from Stripe
+    const product = await stripe.products.retrieve(productId);
+    
+    if (!product.active) {
+      throw new Error('Product is not active');
+    }
+    
+    // Get the default price for this product
+    const prices = await stripe.prices.list({
+      product: productId,
+      active: true,
+      limit: 10
+    });
+    
+    if (prices.data.length === 0) {
+      throw new Error('No active prices found for product');
+    }
+    
+    // Check if the submitted amount matches any of the product's prices
+    const validPrice = prices.data.find(price => 
+      price.unit_amount === amount && price.currency === 'usd'
+    );
+    
+    if (!validPrice) {
+      throw new Error(`Amount ${amount} cents does not match any valid price for this product`);
+    }
+    
+    return {
+      isValid: true,
+      product: product,
+      price: validPrice
+    };
+    
+  } catch (error) {
+    console.error('Product validation error:', error.message);
+    return {
+      isValid: false,
+      error: error.message
+    };
+  }
+}
 function rateLimit(req, res, next) {
   const ip = req.ip || req.connection.remoteAddress;
   const now = Date.now();
@@ -170,19 +212,13 @@ app.post('/process-payment', rateLimit, async (req, res) => {
       return res.status(400).json({ error: 'Invalid product' });
     }
     
-    // Whitelist allowed products
-    const allowedProducts = {
-      'prod_SfYipzYOk3rdyN': 4700, // Main product $47
-      'prod_SfYjjur56WyxMI': 29700 // Upsell product $297
-    };
-    
-    if (!allowedProducts[product_id]) {
-      return res.status(400).json({ error: 'Invalid product ID' });
+    // Dynamic product validation against Stripe
+    const productValidation = await validateProduct(product_id, amount);
+    if (!productValidation.isValid) {
+      return res.status(400).json({ error: productValidation.error });
     }
     
-    if (amount !== allowedProducts[product_id]) {
-      return res.status(400).json({ error: 'Amount does not match product' });
-    }
+    console.log(`✅ Product validated: ${productValidation.product.name} - ${amount/100}`);
     
     const sanitizedEmail = email.toLowerCase().trim();
     let customer;
@@ -314,14 +350,13 @@ app.post('/process-upsell', rateLimit, async (req, res) => {
       return res.status(400).json({ error: 'Invalid amount' });
     }
     
-    // Whitelist upsell products and amounts
-    const allowedUpsells = {
-      'prod_SfYjjur56WyxMI': 29700 // $297 coaching
-    };
-    
-    if (!allowedUpsells[product_id] || amount !== allowedUpsells[product_id]) {
-      return res.status(400).json({ error: 'Invalid upsell product or amount' });
+    // Dynamic product validation against Stripe
+    const productValidation = await validateProduct(product_id, amount);
+    if (!productValidation.isValid) {
+      return res.status(400).json({ error: productValidation.error });
     }
+    
+    console.log(`✅ Upsell product validated: ${productValidation.product.name} - ${amount/100}`);
     
     // Verify customer exists
     const customer = await stripe.customers.retrieve(customer_id);
@@ -373,24 +408,53 @@ app.post('/process-upsell', rateLimit, async (req, res) => {
 
 // Email confirmation function with all integrations
 async function sendConfirmationEmail(paymentIntent) {
-  const { customer_email, is_upsell, product_id, customer_stripe_id, purchase_timestamp } = paymentIntent.metadata;
+  const { customer_email, is_upsell, product_id, customer_stripe_id, purchase_timestamp, product_tag } = paymentIntent.metadata;
   const amount = paymentIntent.amount / 100;
   
   console.log(`📨 Processing purchase for: ${customer_email}`);
-  console.log(`💰 Payment amount: $${amount}`);
+  console.log(`💰 Payment amount: ${amount}`);
   console.log(`📋 Product: ${is_upsell === 'true' ? 'Upsell Purchase' : 'Main Course Purchase'}`);
+  console.log(`🏷️ Product tag: ${product_tag || 'main-course'}`);
   
-  // Determine purchase type for tracking
+  // Determine purchase type dynamically based on product name and metadata
   let purchaseType = 'main_course';
-  let productName = 'Black Sheep Business Program';
+  let productName = 'Unknown Product';
   
   if (is_upsell === 'true') {
-    if (product_id === 'prod_SfYjjur56WyxMI') {
-      purchaseType = 'coaching_upsell';
-      productName = 'Premium 1-on-1 Coaching';
-    } else {
-      purchaseType = 'second_upsell';
-      productName = 'Second Upsell Product';
+    // Try to get product name from Stripe
+    try {
+      const product = await stripe.products.retrieve(product_id);
+      productName = product.name;
+      
+      // Use the specific product tag if provided, otherwise fallback to name analysis
+      if (product_tag) {
+        purchaseType = product_tag.replace('-', '_'); // Convert coaching-buyer to coaching_buyer
+      } else {
+        // Fallback to name analysis for legacy support
+        const nameUpper = product.name.toUpperCase();
+        if (nameUpper.includes('COACHING') || nameUpper.includes('COACH')) {
+          purchaseType = 'coaching_upsell';
+        } else if (nameUpper.includes('SOFTWARE') || nameUpper.includes('SOFT')) {
+          purchaseType = 'software_upsell';
+        } else if (nameUpper.includes('PREMIUM') || nameUpper.includes('ADVANCED')) {
+          purchaseType = 'premium_upsell';
+        } else {
+          purchaseType = 'generic_upsell';
+        }
+      }
+    } catch (error) {
+      console.error('Could not retrieve product details:', error.message);
+      purchaseType = product_tag ? product_tag.replace('-', '_') : 'generic_upsell';
+      productName = 'Upsell Product';
+    }
+  } else {
+    // Main course - try to get actual product name
+    try {
+      const product = await stripe.products.retrieve(product_id);
+      productName = product.name;
+    } catch (error) {
+      console.error('Could not retrieve main product details:', error.message);
+      productName = 'Main Product';
     }
   }
   
@@ -411,7 +475,8 @@ async function sendConfirmationEmail(paymentIntent) {
     purchase_type: purchaseType,
     payment_intent_id: paymentIntent.id,
     is_returning_customer: isReturning,
-    customer_stripe_id: customer_stripe_id
+    customer_stripe_id: customer_stripe_id,
+    product_tag: product_tag || 'main-course' // Pass the specific tag
   };
   
   // Send to all integrations
@@ -551,10 +616,15 @@ async function subscribeToEmail(data) {
       console.log(`📧 Subscribed ${data.email} to email list`);
     }
     
-    // Add to specific lists based on purchase type
+    // Add to specific lists based on purchase type (more flexible)
     const purchaseSpecificLists = {
       'main_course': process.env.KLAVIYO_MAIN_COURSE_LIST_ID,
       'coaching_upsell': process.env.KLAVIYO_COACHING_LIST_ID,
+      'software_upsell': process.env.KLAVIYO_SOFTWARE_LIST_ID,
+      'premium_upsell': process.env.KLAVIYO_PREMIUM_LIST_ID,
+      'high_value_upsell': process.env.KLAVIYO_HIGH_VALUE_LIST_ID,
+      'mid_value_upsell': process.env.KLAVIYO_MID_VALUE_LIST_ID,
+      'low_value_upsell': process.env.KLAVIYO_LOW_VALUE_LIST_ID,
       'second_upsell': process.env.KLAVIYO_PREMIUM_LIST_ID
     };
     
@@ -644,7 +714,7 @@ async function sendToGoogleSheets(data) {
   }
 }
 
-// Enhanced Shopify integration with returning customer logic
+// Enhanced Shopify integration with specific product tags
 async function createOrUpdateShopifyCustomer(data) {
   const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
   const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
@@ -655,12 +725,15 @@ async function createOrUpdateShopifyCustomer(data) {
   }
   
   console.log(`🛍️ Processing Shopify customer: ${data.email}`);
-  console.log(`📦 Purchase type: ${data.purchase_type}`);
+  console.log(`📦 Product tag: ${data.product_tag}`);
   console.log(`🔄 Is returning customer: ${data.is_returning_customer}`);
   
   try {
-    // Get tags for this purchase type
-    const newTags = getTagsForPurchase(data.purchase_type);
+    // Use specific product tag instead of progressive tagging
+    const baseTag = 'customer';
+    const productSpecificTag = data.product_tag || 'unknown-product';
+    const newTags = [baseTag, productSpecificTag];
+    
     console.log(`🏷️ Tags to apply: ${newTags.join(', ')}`);
     
     // Search for existing customer
@@ -676,11 +749,13 @@ async function createOrUpdateShopifyCustomer(data) {
     const searchResult = await searchResponse.json();
     
     if (searchResult.customers && searchResult.customers.length > 0) {
-      // EXISTING CUSTOMER - Update
+      // EXISTING CUSTOMER - Add new product tag
       const customer = searchResult.customers[0];
       console.log(`👤 Updating existing Shopify customer: ${customer.id}`);
       
       const existingTags = customer.tags ? customer.tags.split(', ').map(tag => tag.trim()) : [];
+      
+      // Add new product-specific tag (avoid duplicates)
       const allTags = [...new Set([...existingTags, ...newTags])];
       
       // Add returning customer tag only if truly returning (time-based)
@@ -700,19 +775,21 @@ async function createOrUpdateShopifyCustomer(data) {
             id: customer.id,
             tags: allTags.join(', '),
             note: updateCustomerNote(customer.note, data),
-            accepts_marketing: true // Subscribe to marketing
+            accepts_marketing: true
           }
         })
       });
       
       if (updateResponse.ok) {
         console.log(`✅ Updated customer with tags: ${allTags.join(', ')}`);
-        return customer.id; // Return customer ID for order creation
+        return customer.id;
       }
       
     } else {
-      // NEW CUSTOMER - Create
+      // NEW CUSTOMER - Create with specific tags
       console.log(`👤 Creating new Shopify customer...`);
+      
+      const initialTags = [...newTags, 'first-time-customer'];
       
       const createResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers.json`, {
         method: 'POST',
@@ -723,7 +800,7 @@ async function createOrUpdateShopifyCustomer(data) {
         body: JSON.stringify({
           customer: {
             email: data.email,
-            tags: [...newTags, 'first-time-customer'].join(', '),
+            tags: initialTags.join(', '),
             note: buildCustomerNote(data),
             verified_email: true,
             accepts_marketing: true
@@ -733,8 +810,8 @@ async function createOrUpdateShopifyCustomer(data) {
       
       if (createResponse.ok) {
         const newCustomer = await createResponse.json();
-        console.log(`✅ Created new customer with tags: ${newTags.join(', ')}, first-time-customer`);
-        return newCustomer.customer.id; // Return customer ID for order creation
+        console.log(`✅ Created new customer with tags: ${initialTags.join(', ')}`);
+        return newCustomer.customer.id;
       }
     }
     
@@ -775,28 +852,26 @@ async function createShopifyOrder(data) {
       shopifyCustomerId = searchResult.customers[0].id;
     }
     
-    // Define product details for order line items
-    const productDetails = {
-      'prod_SfYipzYOk3rdyN': {
-        title: 'Black Sheep Business Program',
-        price: '47.00',
-        sku: 'BSBP-MAIN-001',
+    // Get product details dynamically from Stripe
+    let product;
+    try {
+      const stripeProduct = await stripe.products.retrieve(data.product_id);
+      product = {
+        title: stripeProduct.name,
+        price: (data.amount / 100).toFixed(2),
+        sku: stripeProduct.metadata?.sku || `BSBP-${data.product_id.slice(-6)}`,
+        vendor: stripeProduct.metadata?.vendor || 'Black Sheep Business'
+      };
+    } catch (error) {
+      console.error('Could not retrieve product details for order:', error.message);
+      // Fallback to basic product info
+      product = {
+        title: data.product_name || 'Product',
+        price: (data.amount / 100).toFixed(2),
+        sku: `BSBP-${data.product_id.slice(-6)}`,
         vendor: 'Black Sheep Business'
-      },
-      'prod_SfYjjur56WyxMI': {
-        title: 'Premium 1-on-1 Coaching',
-        price: '297.00', 
-        sku: 'BSBP-COACH-001',
-        vendor: 'Black Sheep Business'
-      }
-    };
-    
-    const product = productDetails[data.product_id] || {
-      title: data.product_name,
-      price: data.amount.toString(),
-      sku: `BSBP-${data.product_id}`,
-      vendor: 'Black Sheep Business'
-    };
+      };
+    }
     
     // Create order payload (simplified to avoid API restrictions)
     const orderData = {
@@ -920,7 +995,7 @@ function updateCustomerNote(existingNote, data) {
   return existingNote + '\n\nPurchase History:\n' + newPurchase;
 }
 
-// Calculate tags for purchase type
+// Calculate tags for purchase type (flexible system)
 function getTagsForPurchase(purchaseType) {
   const baseTag = 'customer';
   
@@ -929,6 +1004,18 @@ function getTagsForPurchase(purchaseType) {
       return [baseTag, 'step-2'];
     case 'coaching_upsell':
       return [baseTag, 'step-2', 'step-3'];
+    case 'software_upsell':
+      return [baseTag, 'step-2', 'step-4'];
+    case 'premium_upsell':
+      return [baseTag, 'step-2', 'step-3', 'step-4'];
+    case 'high_value_upsell':
+      return [baseTag, 'step-2', 'step-3', 'high-value'];
+    case 'mid_value_upsell':
+      return [baseTag, 'step-2', 'step-4', 'mid-value'];
+    case 'low_value_upsell':
+      return [baseTag, 'step-2', 'step-4', 'low-value'];
+    case 'generic_upsell':
+      return [baseTag, 'step-2', 'upsell-buyer'];
     case 'second_upsell':
       return [baseTag, 'step-2', 'step-3', 'step-4'];
     case 'third_upsell':
@@ -936,8 +1023,8 @@ function getTagsForPurchase(purchaseType) {
     case 'fourth_upsell':
       return [baseTag, 'step-2', 'step-3', 'step-4', 'step-5', 'step-6'];
     default:
-      console.log(`⚠️ Unknown purchase type: ${purchaseType}`);
-      return [baseTag];
+      console.log(`⚠️ Unknown purchase type: ${purchaseType}, using generic tags`);
+      return [baseTag, 'purchase-made'];
   }
 }
 
@@ -952,24 +1039,55 @@ async function sendEmailConfirmation(data) {
 // TEST AND DEBUG ENDPOINTS
 // ═══════════════════════════════════════════════════════════════
 
-// Test Shopify integration
+// Test Shopify integration (flexible for any product)
 app.post('/test-shopify', async (req, res) => {
-  const { email, purchase_type } = req.body;
+  const { email, purchase_type, product_id, amount, product_tag } = req.body;
   
   if (!email) {
     return res.status(400).json({ error: 'Email required for testing' });
   }
   
   try {
-    const testData = {
-      email: email,
-      amount: purchase_type === 'main_course' ? 47 : 297,
-      product_id: purchase_type === 'main_course' ? 'prod_SfYipzYOk3rdyN' : 'prod_SfYjjur56WyxMI',
-      product_name: purchase_type === 'main_course' ? 'Black Sheep Business Program' : 'Premium 1-on-1 Coaching',
-      purchase_type: purchase_type || 'main_course',
-      payment_intent_id: 'test_' + Date.now(),
-      is_returning_customer: false
-    };
+    let testData;
+    
+    if (product_id && amount) {
+      // Custom product testing
+      const productValidation = await validateProduct(product_id, amount);
+      if (!productValidation.isValid) {
+        return res.status(400).json({ error: productValidation.error });
+      }
+      
+      testData = {
+        email: email,
+        amount: amount / 100, // Convert cents to dollars for internal use
+        product_id: product_id,
+        product_name: productValidation.product.name,
+        purchase_type: purchase_type || 'main_course',
+        payment_intent_id: 'test_' + Date.now(),
+        is_returning_customer: false,
+        product_tag: product_tag || 'test-product'
+      };
+    } else {
+      // Default preset testing with specific tags
+      const presetData = {
+        'main_course': { amount: 47, product_id: 'prod_SfYipzYOk3rdyN', name: 'Black Sheep Business Program', tag: 'main-course' },
+        'coaching_upsell': { amount: 297, product_id: 'prod_SfYjjur56WyxMI', name: 'Premium 1-on-1 Coaching', tag: 'coaching-buyer' },
+        'software_upsell': { amount: 97, product_id: 'prod_SfdrwTwTQpDt5a', name: 'Software', tag: 'software-buyer' }
+      };
+      
+      const preset = presetData[purchase_type] || presetData['main_course'];
+      
+      testData = {
+        email: email,
+        amount: preset.amount,
+        product_id: preset.product_id,
+        product_name: preset.name,
+        purchase_type: purchase_type || 'main_course',
+        payment_intent_id: 'test_' + Date.now(),
+        is_returning_customer: false,
+        product_tag: product_tag || preset.tag
+      };
+    }
     
     console.log('🧪 Testing Shopify integration with data:', testData);
     
@@ -979,8 +1097,10 @@ app.post('/test-shopify', async (req, res) => {
     
     res.json({ 
       success: true, 
-      message: `Successfully processed ${purchase_type} for ${email}`,
-      tags_applied: getTagsForPurchase(purchase_type),
+      message: `Successfully processed ${testData.purchase_type} for ${email}`,
+      product: testData.product_name,
+      amount: testData.amount,
+      tags_applied: ['customer', testData.product_tag],
       order_created: true
     });
     
@@ -993,24 +1113,97 @@ app.post('/test-shopify', async (req, res) => {
   }
 });
 
-// Test order creation specifically
+// Test any product validation
+app.post('/test-product', async (req, res) => {
+  const { product_id, amount } = req.body;
+  
+  if (!product_id || !amount) {
+    return res.status(400).json({ error: 'product_id and amount required' });
+  }
+  
+  try {
+    const validation = await validateProduct(product_id, amount);
+    
+    if (validation.isValid) {
+      res.json({
+        success: true,
+        product: {
+          id: validation.product.id,
+          name: validation.product.name,
+          description: validation.product.description,
+          active: validation.product.active
+        },
+        price: {
+          id: validation.price.id,
+          amount: validation.price.unit_amount,
+          currency: validation.price.currency,
+          display_amount: `${validation.price.unit_amount / 100}`
+        },
+        message: 'Product and amount are valid!'
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        error: validation.error
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Product test failed:', error);
+    res.status(500).json({ 
+      error: error.message
+    });
+  }
+});
+// Test order creation specifically (flexible for any product)
 app.post('/test-shopify-order', async (req, res) => {
-  const { email, purchase_type } = req.body;
+  const { email, purchase_type, product_id, amount, product_tag } = req.body;
   
   if (!email) {
     return res.status(400).json({ error: 'Email required for testing' });
   }
   
   try {
-    const testData = {
-      email: email,
-      amount: purchase_type === 'main_course' ? 47 : 297,
-      product_id: purchase_type === 'main_course' ? 'prod_SfYipzYOk3rdyN' : 'prod_SfYjjur56WyxMI',
-      product_name: purchase_type === 'main_course' ? 'Black Sheep Business Program' : 'Premium 1-on-1 Coaching',
-      purchase_type: purchase_type || 'main_course',
-      payment_intent_id: 'order_test_' + Date.now(),
-      is_returning_customer: false
-    };
+    let testData;
+    
+    if (product_id && amount) {
+      // Custom product testing
+      const productValidation = await validateProduct(product_id, amount);
+      if (!productValidation.isValid) {
+        return res.status(400).json({ error: productValidation.error });
+      }
+      
+      testData = {
+        email: email,
+        amount: amount / 100, // Convert cents to dollars
+        product_id: product_id,
+        product_name: productValidation.product.name,
+        purchase_type: purchase_type || 'main_course',
+        payment_intent_id: 'order_test_' + Date.now(),
+        is_returning_customer: false,
+        product_tag: product_tag || 'test-product'
+      };
+    } else {
+      // Default preset testing with specific tags
+      const presetData = {
+        'main_course': { amount: 47, product_id: 'prod_SfYipzYOk3rdyN', name: 'Black Sheep Business Program', tag: 'main-course' },
+        'coaching_upsell': { amount: 297, product_id: 'prod_SfYjjur56WyxMI', name: 'Premium 1-on-1 Coaching', tag: 'coaching-buyer' },
+        'software_upsell': { amount: 97, product_id: 'prod_SfdrwTwTQpDt5a', name: 'Software', tag: 'software-buyer' }
+      };
+      
+      const preset = presetData[purchase_type] || presetData['main_course'];
+      
+      testData = {
+        email: email,
+        amount: preset.amount,
+        product_id: preset.product_id,
+        product_name: preset.name,
+        purchase_type: purchase_type || 'main_course',
+        payment_intent_id: 'order_test_' + Date.now(),
+        is_returning_customer: false,
+        product_tag: product_tag || preset.tag
+      };
+    }
     
     console.log('🛒 Testing Shopify order creation with data:', testData);
     
@@ -1020,8 +1213,9 @@ app.post('/test-shopify-order', async (req, res) => {
       success: true, 
       message: `Successfully created order for ${email}`,
       order_id: orderId,
+      product: testData.product_name,
       amount: testData.amount,
-      product: testData.product_name
+      tags_applied: ['customer', testData.product_tag]
     });
     
   } catch (error) {
