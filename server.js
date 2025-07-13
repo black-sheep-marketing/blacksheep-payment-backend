@@ -798,7 +798,7 @@ async function createShopifyOrder(data) {
       vendor: 'Black Sheep Business'
     };
     
-    // Create order payload
+    // Create order payload (simplified to avoid API restrictions)
     const orderData = {
       order: {
         email: data.email,
@@ -806,35 +806,18 @@ async function createShopifyOrder(data) {
         fulfillment_status: null,
         send_receipt: false,
         send_fulfillment_receipt: false,
-        note: `Order created from Stripe payment: ${data.payment_intent_id}`,
-        tags: `stripe-payment, ${data.purchase_type}, payment-intent-${data.payment_intent_id}`,
+        note: `Order created from Stripe payment: ${data.payment_intent_id}\nPurchase Type: ${data.purchase_type}\nProduct ID: ${data.product_id}`,
+        tags: `stripe-payment,${data.purchase_type.replace('_', '-')},external-payment`,
         line_items: [
           {
             title: product.title,
             price: product.price,
             quantity: 1,
             vendor: product.vendor,
-            product_id: null, // We're not using Shopify products, just line items
-            variant_id: null,
-            sku: product.sku,
             requires_shipping: false,
             taxable: false,
             gift_card: false,
-            fulfillment_service: 'manual',
-            properties: [
-              {
-                name: 'Purchase Type',
-                value: data.purchase_type
-              },
-              {
-                name: 'Stripe Payment ID',
-                value: data.payment_intent_id
-              },
-              {
-                name: 'Product ID',
-                value: data.product_id
-              }
-            ]
+            fulfillment_service: 'manual'
           }
         ],
         transactions: [
@@ -843,21 +826,13 @@ async function createShopifyOrder(data) {
             status: 'success',
             amount: data.amount.toString(),
             currency: 'USD',
-            gateway: 'Stripe',
-            source_name: 'web',
-            receipt: {
-              payment_id: data.payment_intent_id
-            }
+            gateway: 'manual'
           }
         ],
         total_price: data.amount.toString(),
         subtotal_price: data.amount.toString(),
         total_tax: '0.00',
-        currency: 'USD',
-        created_at: new Date().toISOString(),
-        source_name: 'web',
-        referring_site: 'getblacksheep.com',
-        landing_site: 'getblacksheep.com'
+        currency: 'USD'
       }
     };
     
@@ -866,26 +841,17 @@ async function createShopifyOrder(data) {
       orderData.order.customer = {
         id: shopifyCustomerId
       };
-    } else {
-      // Create customer data inline if not found
-      orderData.order.customer = {
-        email: data.email,
-        accepts_marketing: true,
-        first_name: '',
-        last_name: ''
-      };
     }
     
-    // Add billing address (required for orders)
+    // Billing address (simplified - required for orders)
     orderData.order.billing_address = {
-      first_name: '',
+      first_name: 'Customer',
       last_name: '',
-      address1: '',
-      city: '',
+      address1: 'Online Purchase',
+      city: 'Online',
       province: '',
       country: 'US',
-      zip: '',
-      phone: '',
+      zip: '00000',
       email: data.email
     };
     
