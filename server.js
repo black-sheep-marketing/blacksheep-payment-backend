@@ -4,9 +4,57 @@ const cors = require('cors');
 
 const app = express();
 
-// Middleware
-app.use(express.json());
+// CORS first (before any routes)
 app.use(cors());
+
+// 🚨 WEBHOOK MUST COME BEFORE express.json() 🚨
+// Enhanced webhook with proper logging (ONLY webhook endpoint)
+app.post('/webhook', express.raw({type: 'application/json'}), (req, res) => {
+  console.log('🔔 Webhook received!');
+  console.log('📊 Headers:', req.headers);
+  
+  const sig = req.headers['stripe-signature'];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  
+  console.log('🔐 Webhook secret configured:', !!endpointSecret);
+  console.log('✍️  Signature present:', !!sig);
+  
+  let event;
+  
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    console.log('✅ Webhook signature verified');
+    console.log('🎯 Event type:', event.type);
+  } catch (err) {
+    console.log(`❌ Webhook signature verification failed:`, err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+  
+  // Handle successful payments
+  if (event.type === 'payment_intent.succeeded') {
+    const paymentIntent = event.data.object;
+    
+    console.log('🎉 Payment succeeded:', paymentIntent.id);
+    console.log('📧 Customer email:', paymentIntent.metadata.customer_email);
+    console.log('📦 Product:', paymentIntent.metadata.product_id);
+    console.log('🔼 Is upsell:', paymentIntent.metadata.is_upsell || 'false');
+    console.log('💰 Amount:', paymentIntent.amount);
+    
+    // Send confirmation email with enhanced logging
+    sendConfirmationEmail(paymentIntent).catch(error => {
+      console.error('❌ Error in sendConfirmationEmail:', error);
+    });
+  } else {
+    console.log('ℹ️  Webhook event type not handled:', event.type);
+  }
+  
+  res.json({received: true});
+});
+
+// NOW JSON middleware (after webhook)
+app.use(express.json());
+
+// All other routes below here...
 
 // Process main course payment
 app.post('/process-payment', async (req, res) => {
@@ -567,49 +615,6 @@ app.get('/debug-env', (req, res) => {
     shopify_url: process.env.SHOPIFY_STORE_URL ? 'Set' : 'Missing',
     environment_vars_count: Object.keys(process.env).length
   });
-});
-
-// Enhanced webhook with proper logging (ONLY webhook endpoint)
-app.post('/webhook', express.raw({type: 'application/json'}), (req, res) => {
-  console.log('🔔 Webhook received!');
-  console.log('📊 Headers:', req.headers);
-  
-  const sig = req.headers['stripe-signature'];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  
-  console.log('🔐 Webhook secret configured:', !!endpointSecret);
-  console.log('✍️  Signature present:', !!sig);
-  
-  let event;
-  
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-    console.log('✅ Webhook signature verified');
-    console.log('🎯 Event type:', event.type);
-  } catch (err) {
-    console.log(`❌ Webhook signature verification failed:`, err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-  
-  // Handle successful payments
-  if (event.type === 'payment_intent.succeeded') {
-    const paymentIntent = event.data.object;
-    
-    console.log('🎉 Payment succeeded:', paymentIntent.id);
-    console.log('📧 Customer email:', paymentIntent.metadata.customer_email);
-    console.log('📦 Product:', paymentIntent.metadata.product_id);
-    console.log('🔼 Is upsell:', paymentIntent.metadata.is_upsell || 'false');
-    console.log('💰 Amount:', paymentIntent.amount);
-    
-    // Send confirmation email with enhanced logging
-    sendConfirmationEmail(paymentIntent).catch(error => {
-      console.error('❌ Error in sendConfirmationEmail:', error);
-    });
-  } else {
-    console.log('ℹ️  Webhook event type not handled:', event.type);
-  }
-  
-  res.json({received: true});
 });
 
 // Health check endpoint
