@@ -638,3 +638,59 @@ app.listen(PORT, () => {
   console.log(`💳 Ready to process $47 main sales and $297 upsells!`);
   console.log(`🌐 Health check: http://localhost:${PORT}/`);
 });
+// Add this endpoint to your server.js for debugging
+app.get('/debug-env', (req, res) => {
+  res.json({
+    stripe_key_configured: !!process.env.STRIPE_SECRET_KEY,
+    shopify_url_configured: !!process.env.SHOPIFY_STORE_URL,
+    shopify_token_configured: !!process.env.SHOPIFY_ACCESS_TOKEN,
+    klaviyo_configured: !!process.env.KLAVIYO_API_KEY,
+    google_sheets_configured: !!process.env.GOOGLE_SHEETS_WEBHOOK_URL,
+    webhook_secret_configured: !!process.env.STRIPE_WEBHOOK_SECRET,
+    shopify_url: process.env.SHOPIFY_STORE_URL ? 'Set' : 'Missing',
+    environment_vars_count: Object.keys(process.env).length
+  });
+});
+
+// Add this enhanced webhook logging
+app.post('/webhook', express.raw({type: 'application/json'}), (req, res) => {
+  console.log('🔔 Webhook received!');
+  console.log('📊 Headers:', req.headers);
+  
+  const sig = req.headers['stripe-signature'];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  
+  console.log('🔐 Webhook secret configured:', !!endpointSecret);
+  console.log('✍️  Signature present:', !!sig);
+  
+  let event;
+  
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    console.log('✅ Webhook signature verified');
+    console.log('🎯 Event type:', event.type);
+  } catch (err) {
+    console.log(`❌ Webhook signature verification failed:`, err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+  
+  // Handle successful payments
+  if (event.type === 'payment_intent.succeeded') {
+    const paymentIntent = event.data.object;
+    
+    console.log('🎉 Payment succeeded:', paymentIntent.id);
+    console.log('📧 Customer email:', paymentIntent.metadata.customer_email);
+    console.log('📦 Product:', paymentIntent.metadata.product_id);
+    console.log('🔼 Is upsell:', paymentIntent.metadata.is_upsell || 'false');
+    console.log('💰 Amount:', paymentIntent.amount);
+    
+    // Send confirmation email with enhanced logging
+    sendConfirmationEmail(paymentIntent).catch(error => {
+      console.error('❌ Error in sendConfirmationEmail:', error);
+    });
+  } else {
+    console.log('ℹ️  Webhook event type not handled:', event.type);
+  }
+  
+  res.json({received: true});
+});
