@@ -187,6 +187,16 @@ async function sendConfirmationEmail(paymentIntent) {
     timestamp: new Date().toISOString()
   });
   
+  // 🆕 ADD SHOPIFY INTEGRATION HERE
+  await createOrUpdateShopifyCustomer({
+    email: customer_email,
+    amount: amount,
+    product_id: product_id,
+    product_name: productName,
+    purchase_type: purchaseType,
+    payment_intent_id: paymentIntent.id
+  });
+  
   // Send confirmation email (you can use Klaviyo for this too)
   await sendEmailConfirmation({
     email: customer_email,
@@ -304,6 +314,270 @@ async function sendToGoogleSheets(data) {
     console.error('❌ Failed to send data to Google Sheets:', error.message);
   }
 }
+
+// 🆕🆕🆕 ADD ALL THESE SHOPIFY FUNCTIONS 🆕🆕🆕
+
+// Simplified Shopify integration without metafields
+async function createOrUpdateShopifyCustomer(data) {
+  const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
+  const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+  
+  if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN) {
+    console.log('⚠️ Shopify credentials not configured');
+    console.log('SHOPIFY_STORE_URL:', SHOPIFY_STORE_URL ? 'Set' : 'Missing');
+    console.log('SHOPIFY_ACCESS_TOKEN:', SHOPIFY_ACCESS_TOKEN ? 'Set' : 'Missing');
+    return;
+  }
+  
+  console.log(`🛍️ Processing Shopify customer: ${data.email}`);
+  console.log(`📦 Purchase type: ${data.purchase_type}`);
+  
+  try {
+    // Get tags for this purchase type
+    const newTags = getTagsForPurchase(data.purchase_type);
+    console.log(`🏷️ Tags to apply: ${newTags.join(', ')}`);
+    
+    // Search for existing customer
+    const searchUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers/search.json?query=email:${encodeURIComponent(data.email)}`;
+    console.log(`🔍 Searching for customer...`);
+    
+    const searchResponse = await fetch(searchUrl, {
+      method: 'GET',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!searchResponse.ok) {
+      const errorText = await searchResponse.text();
+      throw new Error(`Shopify search failed: ${searchResponse.status} - ${errorText}`);
+    }
+    
+    const searchResult = await searchResponse.json();
+    console.log(`📊 Found ${searchResult.customers?.length || 0} existing customers`);
+    
+    if (searchResult.customers && searchResult.customers.length > 0) {
+      // Update existing customer
+      const customer = searchResult.customers[0];
+      console.log(`👤 Updating existing customer: ${customer.id}`);
+      console.log(`🏷️ Current tags: ${customer.tags || 'None'}`);
+      
+      // Merge tags (avoid duplicates)
+      const existingTags = customer.tags ? customer.tags.split(', ').map(tag => tag.trim()) : [];
+      const allTags = [...new Set([...existingTags, ...newTags])];
+      
+      // Update customer
+      const updateResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers/${customer.id}.json`, {
+        method: 'PUT',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          customer: {
+            id: customer.id,
+            tags: allTags.join(', '),
+            note: updateCustomerNote(customer.note, data)
+          }
+        })
+      });
+      
+      if (updateResponse.ok) {
+        console.log(`✅ Updated customer with tags: ${allTags.join(', ')}`);
+      } else {
+        const errorData = await updateResponse.text();
+        throw new Error(`Update failed: ${updateResponse.status} - ${errorData}`);
+      }
+      
+    } else {
+      // Create new customer
+      console.log(`👤 Creating new customer...`);
+      
+      const createResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers.json`, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          customer: {
+            email: data.email,
+            tags: newTags.join(', '),
+            note: buildCustomerNote(data),
+            verified_email: true,
+            accepts_marketing: true
+          }
+        })
+      });
+      
+      if (createResponse.ok) {
+        const newCustomer = await createResponse.json();
+        console.log(`✅ Created customer with tags: ${newTags.join(', ')}`);
+        console.log(`🆔 Customer ID: ${newCustomer.customer.id}`);
+      } else {
+        const errorData = await createResponse.text();
+        throw new Error(`Create failed: ${createResponse.status} - ${errorData}`);
+      }
+    }
+    
+  } catch (error) {
+    console.error('❌ Shopify error:', error.message);
+    // Continue processing even if Shopify fails
+  }
+}
+
+// Build initial customer note
+function buildCustomerNote(data) {
+  const timestamp = new Date().toLocaleDateString();
+  return `Purchase History:
+- ${data.product_name}: $${data.amount} (${timestamp})
+
+Purchase Details:
+- Type: ${data.purchase_type}
+- Payment ID: ${data.payment_intent_id}
+- Product ID: ${data.product_id}`;
+}
+
+// Update existing customer note
+function updateCustomerNote(existingNote, data) {
+  const timestamp = new Date().toLocaleDateString();
+  const newPurchase = `- ${data.product_name}: $${data.amount} (${timestamp})`;
+  
+  if (!existingNote) {
+    return buildCustomerNote(data);
+  }
+  
+  // If note already has purchase history, add to it
+  if (existingNote.includes('Purchase History:')) {
+    // Find the end of the purchase list
+    const lines = existingNote.split('\n');
+    const purchaseIndex = lines.findIndex(line => line.includes('Purchase History:'));
+    
+    if (purchaseIndex !== -1) {
+      // Insert new purchase after "Purchase History:" line
+      lines.splice(purchaseIndex + 1, 0, newPurchase);
+      return lines.join('\n');
+    }
+  }
+  
+  // If no purchase history section, add it
+  return existingNote + '\n\nPurchase History:\n' + newPurchase;
+}
+
+// Clean tag calculation function
+function getTagsForPurchase(purchaseType) {
+  const baseTag = 'customer';
+  
+  switch(purchaseType) {
+    case 'main_course':
+      return [baseTag, 'step-2'];
+      
+    case 'coaching_upsell':
+      return [baseTag, 'step-2', 'step-3'];
+      
+    case 'second_upsell':
+      return [baseTag, 'step-2', 'step-3', 'step-4'];
+      
+    case 'third_upsell':
+      return [baseTag, 'step-2', 'step-3', 'step-4', 'step-5'];
+      
+    case 'fourth_upsell':
+      return [baseTag, 'step-2', 'step-3', 'step-4', 'step-5', 'step-6'];
+      
+    default:
+      console.log(`⚠️ Unknown purchase type: ${purchaseType}`);
+      return [baseTag];
+  }
+}
+
+// 🆕🆕🆕 ADD THESE TEST ENDPOINTS 🆕🆕🆕
+
+// Test Shopify connection and customer creation
+app.post('/test-shopify', async (req, res) => {
+  const { email, purchase_type } = req.body;
+  
+  if (!email) {
+    return res.status(400).json({ error: 'Email required for testing' });
+  }
+  
+  try {
+    // Test data
+    const testData = {
+      email: email,
+      amount: purchase_type === 'main_course' ? 47 : 297,
+      product_id: purchase_type === 'main_course' ? 'prod_SfYipzYOk3rdyN' : 'prod_SfYjjur56WyxMI',
+      product_name: purchase_type === 'main_course' ? 'Black Sheep Business Program' : 'Premium 1-on-1 Coaching',
+      purchase_type: purchase_type || 'main_course',
+      payment_intent_id: 'test_' + Date.now()
+    };
+    
+    console.log('🧪 Testing Shopify integration with data:', testData);
+    
+    await createOrUpdateShopifyCustomer(testData);
+    
+    res.json({ 
+      success: true, 
+      message: `Successfully processed ${purchase_type} for ${email}`,
+      tags_applied: getTagsForPurchase(purchase_type)
+    });
+    
+  } catch (error) {
+    console.error('❌ Shopify test failed:', error);
+    res.status(500).json({ 
+      error: error.message,
+      details: 'Check server logs for full error details'
+    });
+  }
+});
+
+// Test endpoint to check current customer tags
+app.get('/test-shopify-customer/:email', async (req, res) => {
+  const { email } = req.params;
+  
+  const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
+  const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+  
+  if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN) {
+    return res.status(500).json({ error: 'Shopify credentials not configured' });
+  }
+  
+  try {
+    const searchResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers/search.json?query=email:${encodeURIComponent(email)}`, {
+      method: 'GET',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const searchResult = await searchResponse.json();
+    
+    if (searchResult.customers && searchResult.customers.length > 0) {
+      const customer = searchResult.customers[0];
+      res.json({
+        found: true,
+        customer: {
+          id: customer.id,
+          email: customer.email,
+          tags: customer.tags,
+          note: customer.note,
+          created_at: customer.created_at,
+          updated_at: customer.updated_at
+        }
+      });
+    } else {
+      res.json({
+        found: false,
+        message: 'Customer not found in Shopify'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Failed to search Shopify customer:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Send confirmation email
 async function sendEmailConfirmation(data) {
