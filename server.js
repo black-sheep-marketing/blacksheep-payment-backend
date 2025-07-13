@@ -2,6 +2,9 @@ const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const cors = require('cors');
 
+// ADD THIS MISSING LINE - This was causing the 500 error!
+const requestCounts = new Map();
+
 const app = express();
 
 // CORS first (before any routes)
@@ -121,6 +124,7 @@ async function validateProduct(productId, amount) {
     };
   }
 }
+
 function rateLimit(req, res, next) {
   const ip = req.ip || req.connection.remoteAddress;
   const now = Date.now();
@@ -689,6 +693,7 @@ Lead Activity:
     return existingNote + '\n' + optinInfo;
   }
 }
+
 app.post('/process-upsell', rateLimit, async (req, res) => {
   try {
     const { customer_id, payment_method_id, amount, product_id } = req.body;
@@ -1511,6 +1516,7 @@ app.post('/test-product', async (req, res) => {
     });
   }
 });
+
 // Test order creation specifically (flexible for any product)
 app.post('/test-shopify-order', async (req, res) => {
   const { email, purchase_type, product_id, amount, product_tag } = req.body;
