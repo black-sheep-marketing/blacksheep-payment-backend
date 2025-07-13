@@ -286,6 +286,11 @@ app.post('/process-payment', rateLimit, async (req, res) => {
   try {
     const { payment_method_id, email, amount, product_id } = req.body;
     
+    // DEBUG: Log the received amount
+    console.log(`🔍 DEBUG: Received amount from frontend: ${amount} (should be in cents)`);
+    console.log(`🔍 DEBUG: Amount as dollars: ${amount / 100}`);
+    console.log(`🔍 DEBUG: Product ID: ${product_id}`);
+    
     // Security validations
     if (!payment_method_id || typeof payment_method_id !== 'string') {
       return res.status(400).json({ error: 'Invalid payment method' });
@@ -296,6 +301,7 @@ app.post('/process-payment', rateLimit, async (req, res) => {
     }
     
     if (!isValidAmount(amount)) {
+      console.log(`❌ Amount validation failed: ${amount}`);
       return res.status(400).json({ error: 'Invalid amount' });
     }
     
@@ -309,7 +315,7 @@ app.post('/process-payment', rateLimit, async (req, res) => {
       return res.status(400).json({ error: productValidation.error });
     }
     
-    console.log(`✅ Product validated: ${productValidation.product.name} - ${amount/100}`);
+    console.log(`✅ Product validated: ${productValidation.product.name} - ${amount/100} (${amount} cents)`);
     
     const sanitizedEmail = email.toLowerCase().trim();
     let customer;
@@ -373,6 +379,9 @@ app.post('/process-payment', rateLimit, async (req, res) => {
       });
     }
     
+    // DEBUG: Log amount before creating payment intent
+    console.log(`💳 Creating payment intent with amount: ${amount} cents (${amount/100})`);
+    
     // Create and confirm payment intent
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amount,
@@ -391,6 +400,8 @@ app.post('/process-payment', rateLimit, async (req, res) => {
         purchase_timestamp: Math.floor(Date.now() / 1000).toString()
       }
     });
+    
+    console.log(`🎉 Payment intent created: ${paymentIntent.id} for ${paymentIntent.amount/100}`);
     
     if (paymentIntent.status === 'requires_action') {
       res.json({
