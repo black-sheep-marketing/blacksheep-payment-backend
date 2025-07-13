@@ -1,0 +1,29 @@
+{
+  "name": "blacksheep-payment-backend",
+  "version": "1.0.0",
+  "description": "Secure backend for Black Sheep Business Program payment processing with seamless one-click upsells",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "stripe": "^12.9.0",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "stripe",
+    "payments",
+    "upsell",
+    "express",
+    "blacksheep",
+    "business",
+    "secure"
+  ],
+  "author": "Black Sheep Business",
+  "license": "MIT"
+}
