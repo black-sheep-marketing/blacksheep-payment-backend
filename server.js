@@ -332,7 +332,363 @@ app.post('/process-payment', rateLimit, async (req, res) => {
   }
 });
 
-// Process one-click upsell with validation
+// Process opt-in form submission (no payment)
+app.post('/process-optin', rateLimit, async (req, res) => {
+  try {
+    const { name, email, phone, optin_tag, form_name, lead_magnet, step_number } = req.body;
+    
+    // Validation
+    if (!name || typeof name !== 'string' || name.trim().length < 2) {
+      return res.status(400).json({ error: 'Invalid name - please enter your full name' });
+    }
+    
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    
+    if (!phone || typeof phone !== 'string') {
+      return res.status(400).json({ error: 'Invalid phone number' });
+    }
+    
+    if (!optin_tag || typeof optin_tag !== 'string') {
+      return res.status(400).json({ error: 'Invalid optin configuration' });
+    }
+    
+    const sanitizedEmail = email.toLowerCase().trim();
+    const sanitizedName = name.trim();
+    const sanitizedPhone = phone.trim();
+    
+    console.log(`📋 Processing opt-in for: ${sanitizedEmail}`);
+    console.log(`📝 Form: ${form_name || 'Unknown'}`);
+    console.log(`🏷️ Tag: ${optin_tag}`);
+    
+    // Create opt-in data for processing
+    const optinData = {
+      email: sanitizedEmail,
+      name: sanitizedName,
+      phone: sanitizedPhone,
+      optin_tag: optin_tag,
+      form_name: form_name || 'Opt-in Form',
+      lead_magnet: lead_magnet || 'Lead Magnet',
+      step_number: step_number || 1,
+      optin_timestamp: new Date().toISOString()
+    };
+    
+    // Process the opt-in (send to all integrations)
+    await Promise.allSettled([
+      processOptinToKlaviyo(optinData),
+      subscribeOptinToEmail(optinData),
+      sendOptinToGoogleSheets(optinData),
+      createOrUpdateShopifyLead(optinData)
+    ]);
+    
+    console.log(`✅ Opt-in processed successfully for: ${sanitizedEmail}`);
+    
+    res.json({
+      success: true,
+      message: 'Opt-in processed successfully',
+      email: sanitizedEmail,
+      optin_tag: optin_tag
+    });
+    
+  } catch (error) {
+    console.error('Opt-in processing error:', error);
+    res.status(400).json({ error: 'Failed to process opt-in. Please try again.' });
+  }
+});
+
+// Send opt-in data to Klaviyo
+async function processOptinToKlaviyo(data) {
+  const KLAVIYO_API_KEY = process.env.KLAVIYO_API_KEY;
+  
+  if (!KLAVIYO_API_KEY) {
+    console.log('⚠️ Klaviyo API key not configured for opt-in');
+    return;
+  }
+  
+  try {
+    // Create/update profile with opt-in data
+    const profileResponse = await fetch('https://a.klaviyo.com/api/profiles/', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
+        'Content-Type': 'application/json',
+        'revision': '2024-07-15'
+      },
+      body: JSON.stringify({
+        data: {
+          type: 'profile',
+          attributes: {
+            email: data.email,
+            first_name: data.name.split(' ')[0],
+            last_name: data.name.split(' ').slice(1).join(' '),
+            phone_number: data.phone,
+            properties: {
+              lead_source: data.form_name,
+              lead_magnet: data.lead_magnet,
+              optin_tag: data.optin_tag,
+              optin_date: data.optin_timestamp,
+              step_completed: data.step_number
+            }
+          }
+        }
+      })
+    });
+    
+    // Track opt-in event
+    const eventResponse = await fetch('https://a.klaviyo.com/api/events/', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
+        'Content-Type': 'application/json',
+        'revision': '2024-07-15'
+      },
+      body: JSON.stringify({
+        data: {
+          type: 'event',
+          attributes: {
+            profile: { email: data.email },
+            metric: { name: 'Lead Opted In' },
+            properties: {
+              form_name: data.form_name,
+              lead_magnet: data.lead_magnet,
+              optin_tag: data.optin_tag,
+              phone: data.phone,
+              step_number: data.step_number
+            }
+          }
+        }
+      })
+    });
+    
+    console.log('✅ Opt-in data sent to Klaviyo successfully');
+    
+  } catch (error) {
+    console.error('❌ Failed to send opt-in data to Klaviyo:', error.message);
+  }
+}
+
+// Subscribe opt-in to email lists
+async function subscribeOptinToEmail(data) {
+  const KLAVIYO_API_KEY = process.env.KLAVIYO_API_KEY;
+  const KLAVIYO_OPTIN_LIST_ID = process.env.KLAVIYO_OPTIN_LIST_ID; // Main opt-in list
+  
+  if (!KLAVIYO_API_KEY || !KLAVIYO_OPTIN_LIST_ID) {
+    console.log('⚠️ Klaviyo opt-in subscription not configured');
+    return;
+  }
+  
+  try {
+    // Subscribe to main opt-in list
+    const subscribeResponse = await fetch(`https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
+        'Content-Type': 'application/json',
+        'revision': '2024-07-15'
+      },
+      body: JSON.stringify({
+        data: {
+          type: 'profile-subscription-bulk-create-job',
+          attributes: {
+            profiles: {
+              data: [{
+                type: 'profile',
+                attributes: {
+                  email: data.email,
+                  phone_number: data.phone,
+                  first_name: data.name.split(' ')[0],
+                  last_name: data.name.split(' ').slice(1).join(' '),
+                  subscriptions: {
+                    email: {
+                      marketing: {
+                        consent: 'SUBSCRIBED'
+                      }
+                    }
+                  }
+                }
+              }]
+            }
+          },
+          relationships: {
+            list: {
+              data: {
+                type: 'list',
+                id: KLAVIYO_OPTIN_LIST_ID
+              }
+            }
+          }
+        }
+      })
+    });
+    
+    if (subscribeResponse.ok) {
+      console.log(`📧 Subscribed ${data.email} to opt-in email list`);
+    }
+    
+  } catch (error) {
+    console.error('❌ Failed to subscribe opt-in to email:', error.message);
+  }
+}
+
+// Send opt-in data to Google Sheets
+async function sendOptinToGoogleSheets(data) {
+  const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_WEBHOOK_URL;
+  
+  if (!GOOGLE_SHEETS_URL) {
+    console.log('⚠️ Google Sheets webhook URL not configured for opt-ins');
+    return;
+  }
+  
+  try {
+    const response = await fetch(GOOGLE_SHEETS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'optin',
+        email: data.email,
+        name: data.name,
+        phone: data.phone,
+        form_name: data.form_name,
+        lead_magnet: data.lead_magnet,
+        optin_tag: data.optin_tag,
+        step_number: data.step_number,
+        timestamp: data.optin_timestamp
+      })
+    });
+    
+    if (response.ok) {
+      console.log('✅ Opt-in data sent to Google Sheets successfully');
+    } else {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    
+  } catch (error) {
+    console.error('❌ Failed to send opt-in data to Google Sheets:', error.message);
+  }
+}
+
+// Create or update Shopify customer with opt-in tag
+async function createOrUpdateShopifyLead(data) {
+  const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
+  const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+  
+  if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN) {
+    console.log('⚠️ Shopify credentials not configured for opt-ins');
+    return;
+  }
+  
+  console.log(`🛍️ Processing Shopify lead: ${data.email}`);
+  console.log(`🏷️ Opt-in tag: ${data.optin_tag}`);
+  
+  try {
+    // Search for existing customer
+    const searchUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers/search.json?query=email:${encodeURIComponent(data.email)}`;
+    const searchResponse = await fetch(searchUrl, {
+      method: 'GET',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const searchResult = await searchResponse.json();
+    
+    if (searchResult.customers && searchResult.customers.length > 0) {
+      // EXISTING CUSTOMER - Add opt-in tag
+      const customer = searchResult.customers[0];
+      console.log(`👤 Updating existing Shopify customer: ${customer.id}`);
+      
+      const existingTags = customer.tags ? customer.tags.split(', ').map(tag => tag.trim()) : [];
+      const newTags = ['lead', data.optin_tag];
+      const allTags = [...new Set([...existingTags, ...newTags])];
+      
+      const updateResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers/${customer.id}.json`, {
+        method: 'PUT',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          customer: {
+            id: customer.id,
+            tags: allTags.join(', '),
+            phone: data.phone,
+            first_name: data.name.split(' ')[0],
+            last_name: data.name.split(' ').slice(1).join(' '),
+            note: updateOptinNote(customer.note, data),
+            accepts_marketing: true
+          }
+        })
+      });
+      
+      if (updateResponse.ok) {
+        console.log(`✅ Updated lead with tags: ${allTags.join(', ')}`);
+      }
+      
+    } else {
+      // NEW LEAD - Create customer
+      console.log(`👤 Creating new Shopify lead...`);
+      
+      const createResponse = await fetch(`https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers.json`, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          customer: {
+            email: data.email,
+            phone: data.phone,
+            first_name: data.name.split(' ')[0],
+            last_name: data.name.split(' ').slice(1).join(' '),
+            tags: ['lead', data.optin_tag].join(', '),
+            note: buildOptinNote(data),
+            verified_email: false,
+            accepts_marketing: true
+          }
+        })
+      });
+      
+      if (createResponse.ok) {
+        const newCustomer = await createResponse.json();
+        console.log(`✅ Created new lead with tags: lead, ${data.optin_tag}`);
+      }
+    }
+    
+  } catch (error) {
+    console.error('❌ Shopify lead error:', error.message);
+  }
+}
+
+// Build opt-in note
+function buildOptinNote(data) {
+  return `Lead Information:
+- Form: ${data.form_name}
+- Lead Magnet: ${data.lead_magnet}
+- Opted In: ${new Date(data.optin_timestamp).toLocaleDateString()}
+- Step: ${data.step_number}
+- Tag: ${data.optin_tag}`;
+}
+
+// Update existing customer note with opt-in info
+function updateOptinNote(existingNote, data) {
+  const optinInfo = `
+Lead Activity:
+- Form: ${data.form_name} (${new Date(data.optin_timestamp).toLocaleDateString()})
+- Lead Magnet: ${data.lead_magnet}
+- Tag: ${data.optin_tag}`;
+  
+  if (!existingNote) {
+    return buildOptinNote(data);
+  }
+  
+  if (existingNote.includes('Lead Activity:')) {
+    return existingNote + '\n' + optinInfo;
+  } else {
+    return existingNote + '\n' + optinInfo;
+  }
+}
 app.post('/process-upsell', rateLimit, async (req, res) => {
   try {
     const { customer_id, payment_method_id, amount, product_id } = req.body;
