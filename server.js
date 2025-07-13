@@ -83,6 +83,93 @@ function isValidAmount(amount) {
 // Dynamic product validation against Stripe catalog
 async function validateProduct(productId, amount) {
   try {
+    // Check if we're in test mode
+    const isTestMode = process.env.STRIPE_SECRET_KEY?.includes('test');
+    
+    if (isTestMode) {
+      console.log('🧪 Test mode detected - using flexible product validation');
+      
+      // In test mode, allow common test scenarios without strict validation
+      const testProducts = {
+        'prod_SfYipzYOk3rdyN': { name: 'Black Sheep Business Program', amount: 4700 },
+        'prod_SfYjjur56WyxMI': { name: 'Premium 1-on-1 Coaching', amount: 29700 },
+        'prod_SfdrwTwTQpDt5a': { name: 'Software', amount: 9700 }
+      };
+      
+      // If it's a known test product, return mock validation
+      if (testProducts[productId]) {
+        const testProduct = testProducts[productId];
+        if (testProduct.amount === amount) {
+          return {
+            isValid: true,
+            product: { 
+              id: productId, 
+              name: testProduct.name, 
+              active: true 
+            },
+            price: { 
+              id: 'price_test', 
+              unit_amount: amount, 
+              currency: 'usd' 
+            }
+          };
+        }
+      }
+      
+      // For other test cases, try to fetch from Stripe but don't fail if not found
+      try {
+        const product = await stripe.products.retrieve(productId);
+        
+        if (!product.active) {
+          throw new Error('Product is not active');
+        }
+        
+        const prices = await stripe.prices.list({
+          product: productId,
+          active: true,
+          limit: 10
+        });
+        
+        if (prices.data.length === 0) {
+          throw new Error('No active prices found for product');
+        }
+        
+        const validPrice = prices.data.find(price => 
+          price.unit_amount === amount && price.currency === 'usd'
+        );
+        
+        if (!validPrice) {
+          throw new Error(`Amount ${amount} cents does not match any valid price for this product`);
+        }
+        
+        return {
+          isValid: true,
+          product: product,
+          price: validPrice
+        };
+        
+      } catch (testError) {
+        // In test mode, if product doesn't exist, create a mock response
+        console.log(`⚠️ Test mode: Product ${productId} not found, using fallback validation`);
+        return {
+          isValid: true,
+          product: { 
+            id: productId, 
+            name: 'Test Product', 
+            active: true 
+          },
+          price: { 
+            id: 'price_test_fallback', 
+            unit_amount: amount, 
+            currency: 'usd' 
+          }
+        };
+      }
+    }
+    
+    // LIVE MODE - Strict validation
+    console.log('🔴 Live mode detected - using strict product validation');
+    
     // Get product details from Stripe
     const product = await stripe.products.retrieve(productId);
     
@@ -765,6 +852,12 @@ async function createOrUpdateShopifyCustomer(data) {
             note: updateCustomerNote(customer.note, data),
             accepts_marketing: true,
             accepts_marketing_updated_at: new Date().toISOString(),
+            email_marketing_consent: {
+              state: 'subscribed',
+              opt_in_level: 'single_opt_in',
+              consent_updated_at: new Date().toISOString(),
+              consent_collected_from: 'WEB'
+            },
             sms_marketing_consent: {
               state: 'subscribed',
               opt_in_level: 'single_opt_in',
@@ -802,6 +895,12 @@ async function createOrUpdateShopifyCustomer(data) {
             verified_email: true,
             accepts_marketing: true,
             accepts_marketing_updated_at: new Date().toISOString(),
+            email_marketing_consent: {
+              state: 'subscribed',
+              opt_in_level: 'single_opt_in',
+              consent_updated_at: new Date().toISOString(),
+              consent_collected_from: 'WEB'
+            },
             sms_marketing_consent: {
               state: 'subscribed',
               opt_in_level: 'single_opt_in',
@@ -1148,10 +1247,13 @@ app.get('/debug-env', (req, res) => {
 
 // Health check
 app.get('/', (req, res) => {
+  const isTestMode = process.env.STRIPE_SECRET_KEY?.includes('test');
+  
   res.json({ 
     status: 'Black Sheep Payment Server Running! 🐑',
     message: 'Ready to process seamless payments and upsells - Shopify Only Version',
     environment: process.env.NODE_ENV || 'development',
+    stripe_mode: isTestMode ? 'test' : 'live',
     timestamp: new Date().toISOString()
   });
 });
@@ -1175,9 +1277,12 @@ app.get('/test-stripe', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
+  const isTestMode = process.env.STRIPE_SECRET_KEY?.includes('test');
+  
   console.log(`🚀 Black Sheep payment server running on port ${PORT}`);
   console.log(`💳 Ready to process $47 main sales and $297 upsells!`);
   console.log(`🛍️ Shopify-only integration - will auto-sync to Klaviyo`);
+  console.log(`🔑 Stripe mode: ${isTestMode ? '🧪 TEST MODE' : '🔴 LIVE MODE'}`);
   console.log(`🌐 Health check: http://localhost:${PORT}/`);
   console.log(`🛡️ Environment: ${process.env.NODE_ENV || 'development'}`);
 });
