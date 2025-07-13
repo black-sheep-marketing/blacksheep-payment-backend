@@ -948,7 +948,8 @@ async function createShopifyOrder(data) {
   }
   
   console.log(`🛒 Creating Shopify order for: ${data.email}`);
-  console.log(`💰 Order amount: ${data.amount}`);
+  console.log(`💰 Order amount: ${data.amount} dollars`);
+  console.log(`💰 Order amount in cents: ${data.amount * 100}`);
   
   try {
     // Get Shopify customer ID
@@ -974,7 +975,7 @@ async function createShopifyOrder(data) {
       const stripeProduct = await stripe.products.retrieve(data.product_id);
       product = {
         title: stripeProduct.name,
-        price: (data.amount / 100).toFixed(2),
+        price: data.amount.toFixed(2),  // data.amount is already in dollars
         sku: stripeProduct.metadata?.sku || `BSBP-${data.product_id.slice(-6)}`,
         vendor: stripeProduct.metadata?.vendor || 'Black Sheep Business'
       };
@@ -983,7 +984,7 @@ async function createShopifyOrder(data) {
       // Fallback to basic product info
       product = {
         title: data.product_name || 'Product',
-        price: (data.amount / 100).toFixed(2),
+        price: data.amount.toFixed(2),  // data.amount is already in dollars
         sku: `BSBP-${data.product_id.slice(-6)}`,
         vendor: 'Black Sheep Business'
       };
@@ -1015,13 +1016,13 @@ async function createShopifyOrder(data) {
           {
             kind: 'sale',
             status: 'success',
-            amount: data.amount.toString(),
+            amount: (data.amount * 100).toString(),  // Convert dollars to cents for Shopify
             currency: 'USD',
             gateway: 'manual'
           }
         ],
-        total_price: data.amount.toString(),
-        subtotal_price: data.amount.toString(),
+        total_price: data.amount.toFixed(2),  // Keep as dollars for total_price
+        subtotal_price: data.amount.toFixed(2),  // Keep as dollars for subtotal_price
         total_tax: '0.00',
         currency: 'USD'
       }
