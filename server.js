@@ -2,7 +2,7 @@ const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const cors = require('cors');
 
-// ADD THIS MISSING LINE - This was causing the 500 error!
+// FIX: Add the missing requestCounts Map - this was causing the 500 error!
 const requestCounts = new Map();
 
 const app = express();
@@ -378,13 +378,8 @@ app.post('/process-optin', rateLimit, async (req, res) => {
       optin_timestamp: new Date().toISOString()
     };
     
-    // Process the opt-in (send to all integrations)
-    await Promise.allSettled([
-      processOptinToKlaviyo(optinData),
-      subscribeOptinToEmail(optinData),
-      sendOptinToGoogleSheets(optinData),
-      createOrUpdateShopifyLead(optinData)
-    ]);
+    // Process the opt-in - SIMPLIFIED to just Shopify (will auto-sync to Klaviyo)
+    await createOrUpdateShopifyLead(optinData);
     
     console.log(`✅ Opt-in processed successfully for: ${sanitizedEmail}`);
     
@@ -400,177 +395,6 @@ app.post('/process-optin', rateLimit, async (req, res) => {
     res.status(400).json({ error: 'Failed to process opt-in. Please try again.' });
   }
 });
-
-// Send opt-in data to Klaviyo
-async function processOptinToKlaviyo(data) {
-  const KLAVIYO_API_KEY = process.env.KLAVIYO_API_KEY;
-  
-  if (!KLAVIYO_API_KEY) {
-    console.log('⚠️ Klaviyo API key not configured for opt-in');
-    return;
-  }
-  
-  try {
-    // Create/update profile with opt-in data
-    const profileResponse = await fetch('https://a.klaviyo.com/api/profiles/', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
-        'Content-Type': 'application/json',
-        'revision': '2024-07-15'
-      },
-      body: JSON.stringify({
-        data: {
-          type: 'profile',
-          attributes: {
-            email: data.email,
-            first_name: data.name.split(' ')[0],
-            last_name: data.name.split(' ').slice(1).join(' '),
-            phone_number: data.phone,
-            properties: {
-              lead_source: data.form_name,
-              lead_magnet: data.lead_magnet,
-              optin_tag: data.optin_tag,
-              optin_date: data.optin_timestamp,
-              step_completed: data.step_number
-            }
-          }
-        }
-      })
-    });
-    
-    // Track opt-in event
-    const eventResponse = await fetch('https://a.klaviyo.com/api/events/', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
-        'Content-Type': 'application/json',
-        'revision': '2024-07-15'
-      },
-      body: JSON.stringify({
-        data: {
-          type: 'event',
-          attributes: {
-            profile: { email: data.email },
-            metric: { name: 'Lead Opted In' },
-            properties: {
-              form_name: data.form_name,
-              lead_magnet: data.lead_magnet,
-              optin_tag: data.optin_tag,
-              phone: data.phone,
-              step_number: data.step_number
-            }
-          }
-        }
-      })
-    });
-    
-    console.log('✅ Opt-in data sent to Klaviyo successfully');
-    
-  } catch (error) {
-    console.error('❌ Failed to send opt-in data to Klaviyo:', error.message);
-  }
-}
-
-// Subscribe opt-in to email lists
-async function subscribeOptinToEmail(data) {
-  const KLAVIYO_API_KEY = process.env.KLAVIYO_API_KEY;
-  const KLAVIYO_OPTIN_LIST_ID = process.env.KLAVIYO_OPTIN_LIST_ID; // Main opt-in list
-  
-  if (!KLAVIYO_API_KEY || !KLAVIYO_OPTIN_LIST_ID) {
-    console.log('⚠️ Klaviyo opt-in subscription not configured');
-    return;
-  }
-  
-  try {
-    // Subscribe to main opt-in list
-    const subscribeResponse = await fetch(`https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
-        'Content-Type': 'application/json',
-        'revision': '2024-07-15'
-      },
-      body: JSON.stringify({
-        data: {
-          type: 'profile-subscription-bulk-create-job',
-          attributes: {
-            profiles: {
-              data: [{
-                type: 'profile',
-                attributes: {
-                  email: data.email,
-                  phone_number: data.phone,
-                  first_name: data.name.split(' ')[0],
-                  last_name: data.name.split(' ').slice(1).join(' '),
-                  subscriptions: {
-                    email: {
-                      marketing: {
-                        consent: 'SUBSCRIBED'
-                      }
-                    }
-                  }
-                }
-              }]
-            }
-          },
-          relationships: {
-            list: {
-              data: {
-                type: 'list',
-                id: KLAVIYO_OPTIN_LIST_ID
-              }
-            }
-          }
-        }
-      })
-    });
-    
-    if (subscribeResponse.ok) {
-      console.log(`📧 Subscribed ${data.email} to opt-in email list`);
-    }
-    
-  } catch (error) {
-    console.error('❌ Failed to subscribe opt-in to email:', error.message);
-  }
-}
-
-// Send opt-in data to Google Sheets
-async function sendOptinToGoogleSheets(data) {
-  const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_WEBHOOK_URL;
-  
-  if (!GOOGLE_SHEETS_URL) {
-    console.log('⚠️ Google Sheets webhook URL not configured for opt-ins');
-    return;
-  }
-  
-  try {
-    const response = await fetch(GOOGLE_SHEETS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: 'optin',
-        email: data.email,
-        name: data.name,
-        phone: data.phone,
-        form_name: data.form_name,
-        lead_magnet: data.lead_magnet,
-        optin_tag: data.optin_tag,
-        step_number: data.step_number,
-        timestamp: data.optin_timestamp
-      })
-    });
-    
-    if (response.ok) {
-      console.log('✅ Opt-in data sent to Google Sheets successfully');
-    } else {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-  } catch (error) {
-    console.error('❌ Failed to send opt-in data to Google Sheets:', error.message);
-  }
-}
 
 // Create or update Shopify customer with opt-in tag
 async function createOrUpdateShopifyLead(data) {
@@ -621,13 +445,22 @@ async function createOrUpdateShopifyLead(data) {
             first_name: data.name.split(' ')[0],
             last_name: data.name.split(' ').slice(1).join(' '),
             note: updateOptinNote(customer.note, data),
-            accepts_marketing: true
+            accepts_marketing: true,
+            accepts_marketing_updated_at: new Date().toISOString(),
+            sms_marketing_consent: {
+              state: 'subscribed',
+              opt_in_level: 'single_opt_in',
+              consent_updated_at: new Date().toISOString(),
+              consent_collected_from: 'WEB'
+            }
           }
         })
       });
       
       if (updateResponse.ok) {
         console.log(`✅ Updated lead with tags: ${allTags.join(', ')}`);
+        console.log(`📧 Email marketing: SUBSCRIBED`);
+        console.log(`📱 SMS marketing: SUBSCRIBED`);
       }
       
     } else {
@@ -649,7 +482,14 @@ async function createOrUpdateShopifyLead(data) {
             tags: ['lead', data.optin_tag].join(', '),
             note: buildOptinNote(data),
             verified_email: false,
-            accepts_marketing: true
+            accepts_marketing: true,
+            accepts_marketing_updated_at: new Date().toISOString(),
+            sms_marketing_consent: {
+              state: 'subscribed',
+              opt_in_level: 'single_opt_in',
+              consent_updated_at: new Date().toISOString(),
+              consent_collected_from: 'WEB'
+            }
           }
         })
       });
@@ -657,6 +497,8 @@ async function createOrUpdateShopifyLead(data) {
       if (createResponse.ok) {
         const newCustomer = await createResponse.json();
         console.log(`✅ Created new lead with tags: lead, ${data.optin_tag}`);
+        console.log(`📧 Email marketing: SUBSCRIBED`);
+        console.log(`📱 SMS marketing: SUBSCRIBED`);
       }
     }
     
@@ -767,7 +609,7 @@ app.post('/process-upsell', rateLimit, async (req, res) => {
 // POST-PURCHASE PROCESSING
 // ═══════════════════════════════════════════════════════════════
 
-// Email confirmation function with all integrations
+// Email confirmation function - SIMPLIFIED to just Shopify
 async function sendConfirmationEmail(paymentIntent) {
   const { customer_email, is_upsell, product_id, customer_stripe_id, purchase_timestamp, product_tag } = paymentIntent.metadata;
   const amount = paymentIntent.amount / 100;
@@ -840,239 +682,12 @@ async function sendConfirmationEmail(paymentIntent) {
     product_tag: product_tag || 'main-course' // Pass the specific tag
   };
   
-  // Send to all integrations
+  // SIMPLIFIED - Only send to Shopify (will auto-sync to Klaviyo)
   await Promise.allSettled([
-    sendToKlaviyo(purchaseData),
-    subscribeToEmail(purchaseData),
-    sendToGoogleSheets({
-      ...purchaseData,
-      timestamp: new Date().toISOString()
-    }),
     createOrUpdateShopifyCustomer(purchaseData),
     createShopifyOrder(purchaseData),
     sendEmailConfirmation(purchaseData)
   ]);
-}
-
-// Send data to Klaviyo
-async function sendToKlaviyo(data) {
-  const KLAVIYO_API_KEY = process.env.KLAVIYO_API_KEY;
-  
-  if (!KLAVIYO_API_KEY) {
-    console.log('⚠️ Klaviyo API key not configured');
-    return;
-  }
-  
-  try {
-    // Add/update profile
-    const profileResponse = await fetch('https://a.klaviyo.com/api/profiles/', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
-        'Content-Type': 'application/json',
-        'revision': '2024-07-15'
-      },
-      body: JSON.stringify({
-        data: {
-          type: 'profile',
-          attributes: {
-            email: data.email,
-            properties: {
-              last_purchase_amount: data.amount,
-              last_purchase_product: data.product_name,
-              purchase_type: data.purchase_type,
-              is_returning_customer: data.is_returning_customer
-            }
-          }
-        }
-      })
-    });
-    
-    // Track purchase event
-    const eventResponse = await fetch('https://a.klaviyo.com/api/events/', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
-        'Content-Type': 'application/json',
-        'revision': '2024-07-15'
-      },
-      body: JSON.stringify({
-        data: {
-          type: 'event',
-          attributes: {
-            profile: { email: data.email },
-            metric: { name: 'Purchase Completed' },
-            properties: {
-              purchase_type: data.purchase_type,
-              product_name: data.product_name,
-              product_id: data.product_id,
-              amount: data.amount,
-              payment_intent_id: data.payment_intent_id,
-              is_returning_customer: data.is_returning_customer
-            }
-          }
-        }
-      })
-    });
-    
-    console.log('✅ Data sent to Klaviyo successfully');
-    
-  } catch (error) {
-    console.error('❌ Failed to send data to Klaviyo:', error.message);
-  }
-}
-
-// Subscribe customer to email lists
-async function subscribeToEmail(data) {
-  const KLAVIYO_API_KEY = process.env.KLAVIYO_API_KEY;
-  const KLAVIYO_LIST_ID = process.env.KLAVIYO_LIST_ID; // Main email list
-  
-  if (!KLAVIYO_API_KEY || !KLAVIYO_LIST_ID) {
-    console.log('⚠️ Klaviyo email subscription not configured');
-    return;
-  }
-  
-  try {
-    // Subscribe to main email list
-    const subscribeResponse = await fetch(`https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
-        'Content-Type': 'application/json',
-        'revision': '2024-07-15'
-      },
-      body: JSON.stringify({
-        data: {
-          type: 'profile-subscription-bulk-create-job',
-          attributes: {
-            profiles: {
-              data: [{
-                type: 'profile',
-                attributes: {
-                  email: data.email,
-                  subscriptions: {
-                    email: {
-                      marketing: {
-                        consent: 'SUBSCRIBED'
-                      }
-                    }
-                  }
-                }
-              }]
-            }
-          },
-          relationships: {
-            list: {
-              data: {
-                type: 'list',
-                id: KLAVIYO_LIST_ID
-              }
-            }
-          }
-        }
-      })
-    });
-    
-    if (subscribeResponse.ok) {
-      console.log(`📧 Subscribed ${data.email} to email list`);
-    }
-    
-    // Add to specific lists based on purchase type (more flexible)
-    const purchaseSpecificLists = {
-      'main_course': process.env.KLAVIYO_MAIN_COURSE_LIST_ID,
-      'coaching_upsell': process.env.KLAVIYO_COACHING_LIST_ID,
-      'software_upsell': process.env.KLAVIYO_SOFTWARE_LIST_ID,
-      'premium_upsell': process.env.KLAVIYO_PREMIUM_LIST_ID,
-      'high_value_upsell': process.env.KLAVIYO_HIGH_VALUE_LIST_ID,
-      'mid_value_upsell': process.env.KLAVIYO_MID_VALUE_LIST_ID,
-      'low_value_upsell': process.env.KLAVIYO_LOW_VALUE_LIST_ID,
-      'second_upsell': process.env.KLAVIYO_PREMIUM_LIST_ID
-    };
-    
-    const specificListId = purchaseSpecificLists[data.purchase_type];
-    if (specificListId) {
-      // Subscribe to product-specific list
-      await fetch(`https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
-          'Content-Type': 'application/json',
-          'revision': '2024-07-15'
-        },
-        body: JSON.stringify({
-          data: {
-            type: 'profile-subscription-bulk-create-job',
-            attributes: {
-              profiles: {
-                data: [{
-                  type: 'profile',
-                  attributes: {
-                    email: data.email,
-                    subscriptions: {
-                      email: {
-                        marketing: {
-                          consent: 'SUBSCRIBED'
-                        }
-                      }
-                    }
-                  }
-                }]
-              }
-            },
-            relationships: {
-              list: {
-                data: {
-                  type: 'list',
-                  id: specificListId
-                }
-              }
-            }
-          }
-        })
-      });
-      
-      console.log(`📧 Subscribed ${data.email} to ${data.purchase_type} list`);
-    }
-    
-  } catch (error) {
-    console.error('❌ Failed to subscribe to email:', error.message);
-  }
-}
-
-// Send data to Google Sheets
-async function sendToGoogleSheets(data) {
-  const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_WEBHOOK_URL;
-  
-  if (!GOOGLE_SHEETS_URL) {
-    console.log('⚠️ Google Sheets webhook URL not configured');
-    return;
-  }
-  
-  try {
-    const response = await fetch(GOOGLE_SHEETS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: data.email,
-        amount: data.amount,
-        product_id: data.product_id,
-        product_name: data.product_name,
-        purchase_type: data.purchase_type,
-        payment_intent_id: data.payment_intent_id,
-        is_returning_customer: data.is_returning_customer,
-        timestamp: data.timestamp
-      })
-    });
-    
-    if (response.ok) {
-      console.log('✅ Data sent to Google Sheets successfully');
-    } else {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-  } catch (error) {
-    console.error('❌ Failed to send data to Google Sheets:', error.message);
-  }
 }
 
 // Enhanced Shopify integration with specific product tags
@@ -1136,7 +751,14 @@ async function createOrUpdateShopifyCustomer(data) {
             id: customer.id,
             tags: allTags.join(', '),
             note: updateCustomerNote(customer.note, data),
-            accepts_marketing: true
+            accepts_marketing: true,
+            accepts_marketing_updated_at: new Date().toISOString(),
+            sms_marketing_consent: {
+              state: 'subscribed',
+              opt_in_level: 'single_opt_in',
+              consent_updated_at: new Date().toISOString(),
+              consent_collected_from: 'WEB'
+            }
           }
         })
       });
@@ -1164,7 +786,14 @@ async function createOrUpdateShopifyCustomer(data) {
             tags: initialTags.join(', '),
             note: buildCustomerNote(data),
             verified_email: true,
-            accepts_marketing: true
+            accepts_marketing: true,
+            accepts_marketing_updated_at: new Date().toISOString(),
+            sms_marketing_consent: {
+              state: 'subscribed',
+              opt_in_level: 'single_opt_in',
+              consent_updated_at: new Date().toISOString(),
+              consent_collected_from: 'WEB'
+            }
           }
         })
       });
@@ -1356,39 +985,6 @@ function updateCustomerNote(existingNote, data) {
   return existingNote + '\n\nPurchase History:\n' + newPurchase;
 }
 
-// Calculate tags for purchase type (flexible system)
-function getTagsForPurchase(purchaseType) {
-  const baseTag = 'customer';
-  
-  switch(purchaseType) {
-    case 'main_course':
-      return [baseTag, 'step-2'];
-    case 'coaching_upsell':
-      return [baseTag, 'step-2', 'step-3'];
-    case 'software_upsell':
-      return [baseTag, 'step-2', 'step-4'];
-    case 'premium_upsell':
-      return [baseTag, 'step-2', 'step-3', 'step-4'];
-    case 'high_value_upsell':
-      return [baseTag, 'step-2', 'step-3', 'high-value'];
-    case 'mid_value_upsell':
-      return [baseTag, 'step-2', 'step-4', 'mid-value'];
-    case 'low_value_upsell':
-      return [baseTag, 'step-2', 'step-4', 'low-value'];
-    case 'generic_upsell':
-      return [baseTag, 'step-2', 'upsell-buyer'];
-    case 'second_upsell':
-      return [baseTag, 'step-2', 'step-3', 'step-4'];
-    case 'third_upsell':
-      return [baseTag, 'step-2', 'step-3', 'step-4', 'step-5'];
-    case 'fourth_upsell':
-      return [baseTag, 'step-2', 'step-3', 'step-4', 'step-5', 'step-6'];
-    default:
-      console.log(`⚠️ Unknown purchase type: ${purchaseType}, using generic tags`);
-      return [baseTag, 'purchase-made'];
-  }
-}
-
 // Send confirmation email
 async function sendEmailConfirmation(data) {
   console.log(`📧 Would send ${data.purchase_type} confirmation email to: ${data.email}`);
@@ -1474,121 +1070,6 @@ app.post('/test-shopify', async (req, res) => {
   }
 });
 
-// Test any product validation
-app.post('/test-product', async (req, res) => {
-  const { product_id, amount } = req.body;
-  
-  if (!product_id || !amount) {
-    return res.status(400).json({ error: 'product_id and amount required' });
-  }
-  
-  try {
-    const validation = await validateProduct(product_id, amount);
-    
-    if (validation.isValid) {
-      res.json({
-        success: true,
-        product: {
-          id: validation.product.id,
-          name: validation.product.name,
-          description: validation.product.description,
-          active: validation.product.active
-        },
-        price: {
-          id: validation.price.id,
-          amount: validation.price.unit_amount,
-          currency: validation.price.currency,
-          display_amount: `${validation.price.unit_amount / 100}`
-        },
-        message: 'Product and amount are valid!'
-      });
-    } else {
-      res.status(400).json({
-        success: false,
-        error: validation.error
-      });
-    }
-    
-  } catch (error) {
-    console.error('❌ Product test failed:', error);
-    res.status(500).json({ 
-      error: error.message
-    });
-  }
-});
-
-// Test order creation specifically (flexible for any product)
-app.post('/test-shopify-order', async (req, res) => {
-  const { email, purchase_type, product_id, amount, product_tag } = req.body;
-  
-  if (!email) {
-    return res.status(400).json({ error: 'Email required for testing' });
-  }
-  
-  try {
-    let testData;
-    
-    if (product_id && amount) {
-      // Custom product testing
-      const productValidation = await validateProduct(product_id, amount);
-      if (!productValidation.isValid) {
-        return res.status(400).json({ error: productValidation.error });
-      }
-      
-      testData = {
-        email: email,
-        amount: amount / 100, // Convert cents to dollars
-        product_id: product_id,
-        product_name: productValidation.product.name,
-        purchase_type: purchase_type || 'main_course',
-        payment_intent_id: 'order_test_' + Date.now(),
-        is_returning_customer: false,
-        product_tag: product_tag || 'test-product'
-      };
-    } else {
-      // Default preset testing with specific tags
-      const presetData = {
-        'main_course': { amount: 47, product_id: 'prod_SfYipzYOk3rdyN', name: 'Black Sheep Business Program', tag: 'main-course' },
-        'coaching_upsell': { amount: 297, product_id: 'prod_SfYjjur56WyxMI', name: 'Premium 1-on-1 Coaching', tag: 'coaching-buyer' },
-        'software_upsell': { amount: 97, product_id: 'prod_SfdrwTwTQpDt5a', name: 'Software', tag: 'software-buyer' }
-      };
-      
-      const preset = presetData[purchase_type] || presetData['main_course'];
-      
-      testData = {
-        email: email,
-        amount: preset.amount,
-        product_id: preset.product_id,
-        product_name: preset.name,
-        purchase_type: purchase_type || 'main_course',
-        payment_intent_id: 'order_test_' + Date.now(),
-        is_returning_customer: false,
-        product_tag: product_tag || preset.tag
-      };
-    }
-    
-    console.log('🛒 Testing Shopify order creation with data:', testData);
-    
-    const orderId = await createShopifyOrder(testData);
-    
-    res.json({ 
-      success: true, 
-      message: `Successfully created order for ${email}`,
-      order_id: orderId,
-      product: testData.product_name,
-      amount: testData.amount,
-      tags_applied: ['customer', testData.product_tag]
-    });
-    
-  } catch (error) {
-    console.error('❌ Shopify order test failed:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Check server logs for full error details'
-    });
-  }
-});
-
 // Check customer in Shopify
 app.get('/test-shopify-customer/:email', async (req, res) => {
   const { email } = req.params;
@@ -1637,68 +1118,12 @@ app.get('/test-shopify-customer/:email', async (req, res) => {
   }
 });
 
-// Get customer purchase history
-app.get('/customer-history/:email', async (req, res) => {
-  try {
-    const email = req.params.email.toLowerCase().trim();
-    
-    const customers = await stripe.customers.list({
-      email: email,
-      limit: 1
-    });
-    
-    if (customers.data.length === 0) {
-      return res.json({ 
-        found: false, 
-        message: 'Customer not found' 
-      });
-    }
-    
-    const customer = customers.data[0];
-    
-    const paymentIntents = await stripe.paymentIntents.list({
-      customer: customer.id,
-      limit: 10
-    });
-    
-    const purchaseHistory = paymentIntents.data
-      .filter(pi => pi.status === 'succeeded')
-      .map(pi => ({
-        amount: pi.amount / 100,
-        date: new Date(pi.created * 1000).toLocaleDateString(),
-        product_id: pi.metadata.product_id,
-        is_upsell: pi.metadata.is_upsell === 'true',
-        is_main_purchase: pi.metadata.is_main_purchase === 'true',
-        payment_intent_id: pi.id
-      }));
-    
-    const totalSpent = purchaseHistory.reduce((sum, purchase) => sum + purchase.amount, 0);
-    
-    res.json({
-      found: true,
-      customer_id: customer.id,
-      email: customer.email,
-      total_spent: totalSpent,
-      purchase_count: purchaseHistory.length,
-      purchase_history: purchaseHistory,
-      created: new Date(customer.created * 1000).toLocaleDateString()
-    });
-    
-  } catch (error) {
-    console.error('Error fetching customer history:', error);
-    res.status(500).json({ error: 'Failed to fetch customer history' });
-  }
-});
-
 // Debug environment variables
 app.get('/debug-env', (req, res) => {
   res.json({
     stripe_key_configured: !!process.env.STRIPE_SECRET_KEY,
     shopify_url_configured: !!process.env.SHOPIFY_STORE_URL,
     shopify_token_configured: !!process.env.SHOPIFY_ACCESS_TOKEN,
-    klaviyo_configured: !!process.env.KLAVIYO_API_KEY,
-    klaviyo_list_configured: !!process.env.KLAVIYO_LIST_ID,
-    google_sheets_configured: !!process.env.GOOGLE_SHEETS_WEBHOOK_URL,
     webhook_secret_configured: !!process.env.STRIPE_WEBHOOK_SECRET,
     node_env: process.env.NODE_ENV || 'development',
     environment_vars_count: Object.keys(process.env).length
@@ -1709,7 +1134,7 @@ app.get('/debug-env', (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     status: 'Black Sheep Payment Server Running! 🐑',
-    message: 'Ready to process seamless payments and upsells',
+    message: 'Ready to process seamless payments and upsells - Shopify Only Version',
     environment: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString()
   });
@@ -1736,6 +1161,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Black Sheep payment server running on port ${PORT}`);
   console.log(`💳 Ready to process $47 main sales and $297 upsells!`);
+  console.log(`🛍️ Shopify-only integration - will auto-sync to Klaviyo`);
   console.log(`🌐 Health check: http://localhost:${PORT}/`);
   console.log(`🛡️ Environment: ${process.env.NODE_ENV || 'development'}`);
 });
