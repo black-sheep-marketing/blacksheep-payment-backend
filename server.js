@@ -447,6 +447,12 @@ async function createOrUpdateShopifyLead(data) {
             note: updateOptinNote(customer.note, data),
             accepts_marketing: true,
             accepts_marketing_updated_at: new Date().toISOString(),
+            email_marketing_consent: {
+              state: 'subscribed',
+              opt_in_level: 'single_opt_in',
+              consent_updated_at: new Date().toISOString(),
+              consent_collected_from: 'WEB'
+            },
             sms_marketing_consent: {
               state: 'subscribed',
               opt_in_level: 'single_opt_in',
@@ -484,6 +490,12 @@ async function createOrUpdateShopifyLead(data) {
             verified_email: false,
             accepts_marketing: true,
             accepts_marketing_updated_at: new Date().toISOString(),
+            email_marketing_consent: {
+              state: 'subscribed',
+              opt_in_level: 'single_opt_in',
+              consent_updated_at: new Date().toISOString(),
+              consent_collected_from: 'WEB'
+            },
             sms_marketing_consent: {
               state: 'subscribed',
               opt_in_level: 'single_opt_in',
@@ -765,6 +777,8 @@ async function createOrUpdateShopifyCustomer(data) {
       
       if (updateResponse.ok) {
         console.log(`✅ Updated customer with tags: ${allTags.join(', ')}`);
+        console.log(`📧 Email marketing: SUBSCRIBED`);
+        console.log(`📱 SMS marketing: SUBSCRIBED`);
         return customer.id;
       }
       
@@ -801,6 +815,8 @@ async function createOrUpdateShopifyCustomer(data) {
       if (createResponse.ok) {
         const newCustomer = await createResponse.json();
         console.log(`✅ Created new customer with tags: ${initialTags.join(', ')}`);
+        console.log(`📧 Email marketing: SUBSCRIBED`);
+        console.log(`📱 SMS marketing: SUBSCRIBED`);
         return newCustomer.customer.id;
       }
     }
